@@ -2,67 +2,160 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from io import BytesIO
 import PyPDF2
-import spacy
 import pdfplumber
-from spacy.matcher import PhraseMatcher
+import docx
+import spacy
+import requests
 
 app = Flask(__name__)
-CORS(app, origins=["https://kns-ats-resume-checker.vercel.app"])
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Load spaCy model
 nlp = spacy.load("en_core_web_sm")
 
+GOOGLE_KG_API_URL = "https://kgsearch.googleapis.com/v1/entities:search"
+GOOGLE_KG_API_KEY = "AIzaSyBPyu5zoMFhKUAcV5SHmV1-xhoyVFL3HGY"
 
-# Function: Check formatting issues
-def check_formatting(file):
-    issues = []
+# Function: Extract text from PDF
+def extract_text_from_pdf(file):
+    text = ""
     try:
         with pdfplumber.open(file) as pdf:
-            for page in pdf.pages:
-                # Check for tables
-                if page.extract_tables():
-                    issues.append("Resume contains tables, which may not be ATS-friendly.")
-                # Check for images
-                if page.images:
-                    issues.append("Resume contains images, which may not be ATS-friendly.")
+            text = "\n".join([page.extract_text() or "" for page in pdf.pages])
+    except Exception as e:
+        return "", f"Error extracting text: {str(e)}"
+
+    return text.strip(), None
+
+
+# Function: Extract text from DOCX
+def extract_text_from_docx(file):
+    text = ""
+    try:
+        doc = docx.Document(file)
+        text = "\n".join([para.text for para in doc.paragraphs])
+    except Exception as e:
+        return "", f"Error extracting text: {str(e)}"
+
+    return text.strip(), None
+
+
+# Function: Check formatting issues
+def check_formatting(file, file_type):
+    issues = []
+    try:
+        if file_type == "pdf":
+            with pdfplumber.open(file) as pdf:
+                for page in pdf.pages:
+                    if page.extract_tables():
+                        issues.append("Resume contains tables, which may not be ATS-friendly.")
+                    if page.images:
+                        issues.append("Resume contains images, which may not be ATS-friendly.")
+        elif file_type == "docx":
+            doc = docx.Document(file)
+            for table in doc.tables:
+                issues.append("Resume contains tables, which may not be ATS-friendly.")
+            for shape in doc.inline_shapes:
+                issues.append("Resume contains images, which may not be ATS-friendly.")
     except Exception as e:
         issues.append(f"Error during formatting check: {str(e)}")
+
     return issues
 
 
-# Function: Calculate overall score
-def calculate_score(matched_keywords, jd_keywords, missing_sections, formatting_issues, category_scores):
-    # Base score: Match of keywords between resume and job description
-    base_score = (len(matched_keywords) / len(jd_keywords)) * 100 if jd_keywords else 0
+def fetch_google_kg_skills(job_title):
+    """Fetch related skills using Google Knowledge Graph API."""
+    try:
+        response = requests.get(
+            GOOGLE_KG_API_URL, 
+            params={"query": job_title, "key": GOOGLE_KG_API_KEY, "limit": 10}
+        )
+        data = response.json()
+        skills = {item["name"].lower() for item in data.get("itemListElement", []) if "name" in item}
+        return skills
+    except Exception as e:
+        print(f"Google KG API Error: {e}")
+        return set()
 
-    # Deduct for missing sections and formatting issues
-    deductions = (len(missing_sections) * 5) + (len(formatting_issues) * 10)
+# Function: Extract keywords using NLP
+def extract_keywords(text):
+    doc = nlp(text)
+    return {token.lemma_.lower() for token in doc if token.is_alpha and not token.is_stop}
 
-    # Average category score (weighted more heavily)
-    # Calculate the weighted average for category scores
-    category_score_avg = sum(category_scores.values()) / len(category_scores) if category_scores else 0
 
-    # We give a higher weight to category score, since it's essential for the matching process
-    weighted_score = 0.7 * base_score + 0.3 * category_score_avg
+# Function: Categorize keywords
+def categorize_keywords(resume_keywords):
+    categories = {
+        "skills": [
+            "python", "flask", "django", "javascript", "typescript", "react", "angular", "vue", 
+            "html", "css", "tailwind", "sql", "mysql", "postgresql", "mongodb", "firebase", 
+            "git", "docker", "kubernetes", "linux", "bash", "aws", "azure", "gcp",
+            "tensorflow", "pytorch", "machine learning", "deep learning", "data science",
+            "nlp", "computer vision", "big data", "hadoop", "spark", "cloud computing",
+            "blockchain", "cryptography", "cyber security", "ethical hacking", "penetration testing"
+        ],
+        "experience": [
+            "developer", "software engineer", "internship", "freelance", "full-time", "part-time",
+            "contract", "consulting", "project management", "team lead", "scrum master", 
+            "agile development", "waterfall", "CI/CD", "devops", "system administration"
+        ],
+        "education": [
+            "bachelor", "master", "mba", "phd", "university", "college", "diploma", 
+            "bootcamp", "certification", "coursework", "degree", "online courses", "training"
+        ],
+        "soft_skills": [
+            "teamwork", "leadership", "problem-solving", "communication", "critical thinking",
+            "time management", "multitasking", "adaptability", "creativity", "collaboration",
+            "emotional intelligence", "decision making", "negotiation"
+        ],
+        "tools": [
+            "jira", "confluence", "notion", "figma", "adobe xd", "photoshop", "illustrator",
+            "vs code", "intellij", "pycharm", "eclipse", "xcode", "android studio", 
+            "unity", "unreal engine", "blender", "autocad"
+        ],
+        "frameworks": [
+            "express", "nestjs", "fastapi", "spring", "hibernate", "ruby on rails", "laravel",
+            "flutter", "react native", "electron", "next.js", "nuxt.js"
+        ],
+        "databases": [
+            "mysql", "postgresql", "sqlite", "mongodb", "firebase", "dynamodb", "cassandra", "redis"
+        ],
+        "cloud": [
+            "aws", "azure", "gcp", "heroku", "netlify", "vercel", "digital ocean", "cloudflare"
+        ]
+    }
 
-    # Apply deductions and ensure final score is capped between 0 and 100
-    final_score = weighted_score - deductions
-    final_score = max(0, final_score)  # Ensure score does not go below 0
-    return min(final_score, 100)  # Cap the score at 100
+    category_scores = {cat: 0 for cat in categories}
 
+    for cat, keywords in categories.items():
+        matches = [kw for kw in keywords if kw in resume_keywords]
+        category_scores[cat] = (len(matches) / len(keywords)) * 100 if keywords else 0
+
+    return category_scores
+
+
+def calculate_weighted_score(resume_keywords, job_keywords, weights):
+    score = 0
+    total_weight = 0
+    
+    for category, weight in weights.items():
+        resume_category_keywords = resume_keywords.get(category, [])
+        job_category_keywords = job_keywords.get(category, [])
+        
+        common_keywords = set(resume_category_keywords).intersection(set(job_category_keywords))
+        category_score = len(common_keywords) * weight
+        
+        score += category_score
+        total_weight += weight
+    
+    return score / total_weight if total_weight > 0 else 0
 
 
 
 # Function: Generate feedback
 def generate_feedback(matched_keywords, missing_keywords, formatting_issues, category_scores, jd_keywords):
     return {
-        "overall_score": calculate_score(
-            matched_keywords, 
-            jd_keywords, 
-            missing_sections=[], 
-            formatting_issues=formatting_issues, 
-            category_scores=category_scores
-        ),
+        "overall_score": calculate_score(matched_keywords, jd_keywords, formatting_issues, category_scores),
         "category_scores": category_scores,
         "matched_keywords": list(matched_keywords),
         "missing_keywords": list(missing_keywords),
@@ -74,45 +167,49 @@ def generate_feedback(matched_keywords, missing_keywords, formatting_issues, cat
 @app.route('/analyze', methods=['POST'])
 def analyze_resume():
     try:
-        # Get file and job description from request
         file = request.files.get('resume')
         job_description = request.form.get('job_description')
 
         if not file or not job_description:
             return jsonify({"error": "Resume file and job description are required"}), 400
 
-        # Read file and perform formatting checks
         file_bytes = BytesIO(file.read())
-        formatting_issues = check_formatting(file_bytes)
+        file_type = file.filename.split(".")[-1].lower()
 
-        # Parse resume and job description
-        file_bytes.seek(0)  # Reset the file pointer
-        reader = PyPDF2.PdfReader(file_bytes)
-        resume_text = " ".join([page.extract_text() or "" for page in reader.pages])
-        resume_doc = nlp(resume_text)
-        jd_doc = nlp(job_description)
+        if file_type == "pdf":
+            resume_text, text_error = extract_text_from_pdf(file_bytes)
+        elif file_type == "docx":
+            resume_text, text_error = extract_text_from_docx(file_bytes)
+        else:
+            return jsonify({"error": "Unsupported file format. Only PDF and DOCX are allowed."}), 400
 
-        # Extract keywords
-        resume_keywords = {token.lemma_.lower() for token in resume_doc if token.is_alpha}
-        jd_keywords = {token.lemma_.lower() for token in jd_doc if token.is_alpha}
-        matched_keywords = resume_keywords & jd_keywords
-        missing_keywords = jd_keywords - resume_keywords
+        if text_error:
+            return jsonify({"error": text_error}), 400
+
+        formatting_issues = check_formatting(file_bytes, file_type)
+
+        # Extract keywords from resume & job description
+        resume_keywords = extract_keywords(resume_text)
+        jd_keywords = extract_keywords(job_description)
+
+        # Extract job title (first noun phrase)
+        job_title = next((chunk.text for chunk in nlp(job_description).noun_chunks), None)
+
+        # Fetch additional skills using Google KG API
+        google_kg_skills = fetch_google_kg_skills(job_title) if job_title else set()
+
+        # Combine job description skills with Google KG skills
+        combined_jd_keywords = jd_keywords | google_kg_skills
+
+        matched_keywords = resume_keywords & combined_jd_keywords
+        missing_keywords = combined_jd_keywords - resume_keywords
 
         # Categorize keywords
-        categories = {
-            "skills": ["python", "flask", "teamwork", "django"],
-            "experience": ["developer", "internship", "freelance", "project management"],
-            "education": ["bachelor", "master", "mba"]
-        }
-        category_scores = {cat: 0 for cat in categories}
-        for cat, keywords in categories.items():
-            matches = [kw for kw in keywords if kw in resume_keywords]
-            category_scores[cat] = len(matches) / len(keywords) * 100 if keywords else 0
+        category_scores = categorize_keywords(resume_keywords)
 
         # Generate feedback
-        feedback = generate_feedback(
-            matched_keywords, missing_keywords, formatting_issues, category_scores, jd_keywords
-        )
+        feedback = generate_feedback(matched_keywords, missing_keywords, formatting_issues, category_scores, combined_jd_keywords)
+
         return jsonify(feedback)
 
     except Exception as e:
@@ -122,4 +219,3 @@ def analyze_resume():
 # Run the app
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-
