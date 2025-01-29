@@ -135,6 +135,20 @@ def categorize_keywords(resume_keywords):
     return category_scores
 
 
+def calculate_score(matched_keywords, jd_keywords, formatting_issues, category_scores):
+    # A simple scoring mechanism could be: 
+    score = len(matched_keywords) * 10  # For simplicity, we give 10 points for each matched keyword.
+    
+    # Add bonus for formatting issues or category scores, etc.
+    score -= len(formatting_issues) * 5  # Deduct for each formatting issue found.
+    
+    # Optionally, include category scores for extra weight.
+    score += sum(category_scores.values()) * 0.5  # Adjust the multiplier as necessary.
+    
+    # Normalize the score if needed (e.g., scale it to 100).
+    return min(score, 100)
+
+
 def calculate_weighted_score(resume_keywords, job_keywords, weights):
     score = 0
     total_weight = 0
@@ -150,6 +164,7 @@ def calculate_weighted_score(resume_keywords, job_keywords, weights):
         total_weight += weight
     
     return score / total_weight if total_weight > 0 else 0
+
 
 
 
