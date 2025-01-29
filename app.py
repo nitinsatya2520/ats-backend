@@ -8,7 +8,8 @@ import spacy
 import requests
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": "https://kns-ats-resume-checker.vercel.app"}})
+
 
 # Load spaCy model
 nlp = spacy.load("en_core_web_sm")
