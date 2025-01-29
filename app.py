@@ -88,7 +88,7 @@ def analyze_resume():
         # Parse resume and job description
         file_bytes.seek(0)  # Reset the file pointer
         reader = PyPDF2.PdfReader(file_bytes)
-        resume_text = " ".join([page.extract_text() for page in reader.pages if page.extract_text()])
+        resume_text = " ".join([page.extract_text() or "" for page in reader.pages])
         resume_doc = nlp(resume_text)
         jd_doc = nlp(job_description)
 
